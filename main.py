@@ -1,6 +1,6 @@
 # main.py
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from auth import verify_token # Import the dependency
 from pydantic import BaseModel
 from typing import List

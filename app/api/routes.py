@@ -30,8 +30,9 @@ async def run_submission(
     answers = []
     for question in request.questions:
         try:
+            # --- THIS IS THE CORRECTED LINE ---
             answer = await document_service.answer_question(
-                document_url=request.documents,
+                document_source=request.documents, # Use the correct parameter name
                 question=question
             )
             answers.append(answer)

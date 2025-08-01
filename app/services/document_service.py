@@ -9,28 +9,41 @@ class DocumentService:
     def __init__(self):
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=100)
 
-    def _download_and_parse_pdf(self, url: str) -> str:
+    def _get_text_from_source(self, source: str) -> str:
+        """
+        NEW: Gets text content from either a URL or a local file path.
+        """
         try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            with fitz.open(stream=response.content, filetype="pdf") as doc:
-                return "".join(page.get_text() for page in doc)
+            if source.startswith("http://") or source.startswith("https://"):
+                # It's a URL, so we download it
+                print(f"Downloading from URL: {source}")
+                response = requests.get(source, timeout=30)
+                response.raise_for_status()
+                with fitz.open(stream=response.content, filetype="pdf") as doc:
+                    return "".join(page.get_text() for page in doc)
+            else:
+                # It's a local file path
+                print(f"Reading from local file: {source}")
+                with fitz.open(source) as doc:
+                    return "".join(page.get_text() for page in doc)
         except Exception as e:
-            print(f"Error downloading or parsing PDF: {e}")
+            print(f"Error reading from source {source}: {e}")
             raise
 
-    async def _process_new_document(self, url: str) -> Document:
-        print(f"Processing new document from {url}...")
-        document_text = self._download_and_parse_pdf(url)
+    async def _process_new_document(self, source_url_or_path: str) -> Document:
+        print(f"Processing new document from {source_url_or_path}...")
+        
+        # MODIFIED: Use the new flexible text extraction method
+        document_text = self._get_text_from_source(source_url_or_path)
         
         # 1. Chunk the text
         text_chunks = self.text_splitter.split_text(document_text)
         
         # 2. Create MongoDB document and embedded chunk models
         document_chunks = [Chunk(text=t) for t in text_chunks]
-        new_document = Document(source_url=url, chunks=document_chunks)
+        new_document = Document(source_url=source_url_or_path, chunks=document_chunks)
         
         # 3. Create embeddings for Pinecone
         chunk_texts_for_embedding = [chunk.text for chunk in document_chunks]
@@ -56,11 +69,11 @@ class DocumentService:
         print(f"Successfully processed and stored new document with {len(text_chunks)} chunks.")
         return new_document
 
-    async def answer_question(self, document_url: str, question: str) -> str:
+    async def answer_question(self, document_source: str, question: str) -> str:
         # Check if the document exists in MongoDB, otherwise process and store it.
-        document = await Document.find_one(Document.source_url == document_url)
+        document = await Document.find_one(Document.source_url == document_source)
         if not document:
-            document = await self._process_new_document(document_url)
+            document = await self._process_new_document(document_source)
 
         # 1. Embed the user's question
         question_embedding = self.embeddings_model.embed_query(question)
@@ -69,7 +82,7 @@ class DocumentService:
         pinecone_index = pinecone_client.get_index()
         query_response = pinecone_index.query(
             vector=question_embedding,
-            top_k=5,
+            top_k=8,
             include_metadata=True
         )
         
@@ -80,9 +93,14 @@ class DocumentService:
 
         # 3. Generate the answer with Gemini
         prompt = f"""
-        You are an expert assistant parsing documents. Answer the question based ONLY on the provided context.
-        If the answer is not found, state that "The information is not available in the provided document."
-        Provide a direct and concise answer.
+        You are a meticulous assistant for parsing insurance policy documents. Your task is to follow these steps precisely:
+
+        Step 1: Carefully read the user's QUESTION and the provided CONTEXT.
+        Step 2: Identify and extract the specific sentences or phrases from the CONTEXT that directly answer the QUESTION.
+        Step 3: If no relevant information is found in the CONTEXT, your final answer must be "The information is not available in the provided document."
+        Step 4: If relevant information is found, synthesize a concise and direct final answer based ONLY on the extracted information.
+
+        Begin now.
 
         CONTEXT:
         {context}
@@ -90,7 +108,7 @@ class DocumentService:
         QUESTION:
         {question}
 
-        ANSWER:
+        ANSWER:   
         """
         response = await self.llm.ainvoke(prompt)
         return response.content

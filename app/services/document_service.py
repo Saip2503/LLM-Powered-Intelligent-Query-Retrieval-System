@@ -9,7 +9,7 @@ class DocumentService:
     def __init__(self):
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=100)
+        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 
     def _get_text_from_source(self, source: str) -> str:
         """
@@ -82,7 +82,7 @@ class DocumentService:
         pinecone_index = pinecone_client.get_index()
         query_response = pinecone_index.query(
             vector=question_embedding,
-            top_k=8,
+            top_k=5,
             include_metadata=True
         )
         
@@ -93,14 +93,8 @@ class DocumentService:
 
         # 3. Generate the answer with Gemini
         prompt = f"""
-        You are a meticulous assistant for parsing insurance policy documents. Your task is to follow these steps precisely:
-
-        Step 1: Carefully read the user's QUESTION and the provided CONTEXT.
-        Step 2: Identify and extract the specific sentences or phrases from the CONTEXT that directly answer the QUESTION.
-        Step 3: If no relevant information is found in the CONTEXT, your final answer must be "The information is not available in the provided document."
-        Step 4: If relevant information is found, synthesize a concise and direct final answer based ONLY on the extracted information.
-
-        Begin now.
+        You are a meticulous assistant. Answer the question based ONLY on the provided context.
+        If the answer is not found, state: "The information is not available in the provided document."
 
         CONTEXT:
         {context}
@@ -108,7 +102,7 @@ class DocumentService:
         QUESTION:
         {question}
 
-        ANSWER:   
+        ANSWER:
         """
         response = await self.llm.ainvoke(prompt)
         return response.content

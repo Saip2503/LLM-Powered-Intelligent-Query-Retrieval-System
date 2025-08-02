@@ -4,22 +4,21 @@ from app.services.document_service import DocumentService
 from app.db_mongo.mongo_client import init_db
 from app.vector_db.pinecone_client import pinecone_client
 
-# --- Add your 5 PDF document URLs or local file paths here ---
-# Option 1: URLs
+# --- Updated list of all documents to be ingested ---
 DOCUMENT_SOURCES = [
+    # Local Files
     "data/doc1.pdf",
     "data/BAJHLIP23020V012223.pdf",
     "data/CHOTGDP23004V012223.pdf",
     "data/EDLHLGA23009V012223.pdf",
     "data/HDFHLIP23024V072223.pdf",
-    "data/ICIHLIP22012V012223.pdf"    
+    "data/ICIHLIP22012V012223.pdf",
+    
+    # URLs
+    "https://hackrx.blob.core.windows.net/assets/indian_constitution.pdf?sv=2023-01-03&st=2025-07-28T06%3A42%3A00Z&se=2026-11-29T06%3A42%3A00Z&sr=b&sp=r&sig=5Gs%2FOXqP3zY00lgciu4BZjDV5QjTDIx7fgnfdz6Pu24%3D",
+    "https://hackrx.blob.core.windows.net/assets/Happy%20Family%20Floater%20-%202024%20OICHLIP25046V062425%201.pdf?sv=2023-01-03&spr=https&st=2025-07-31T17%3A24%3A30Z&se=2026-08-01T17%3A24%3A00Z&sr=b&sp=r&sig=VNMTTQUjdXGYb2F4Di4P0zNvmM2rTBoEHr%2BnkUXIqpQ%3D",
+    "https://hackrx.blob.core.windows.net/assets/principia_newton.pdf?sv=2023-01-03&st=2025-07-28T07%3A20%3A32Z&se=2026-07-29T07%3A20%3A00Z&sr=b&sp=r&sig=V5I1QYyigoxeUMbnUKsdEaST99F5%2FDfo7wpKg9XXF5w%3D"
 ]
-
-# Option 2: Local Files (place them in a 'data' folder)
-# DOCUMENT_SOURCES = [
-#     "data/doc1.pdf",
-#     "data/doc2.pdf",
-# ]
 
 async def main():
     """

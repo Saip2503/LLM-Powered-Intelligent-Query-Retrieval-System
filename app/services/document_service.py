@@ -32,42 +32,48 @@ class DocumentService:
             print(f"Error reading from source {source}: {e}")
             raise
 
-    async def _process_new_document(self, source_url_or_path: str) -> Document:
-        print(f"Processing new document from {source_url_or_path}...")
-        
-        # MODIFIED: Use the new flexible text extraction method
-        document_text = self._get_text_from_source(source_url_or_path)
-        
-        # 1. Chunk the text
-        text_chunks = self.text_splitter.split_text(document_text)
-        
-        # 2. Create MongoDB document and embedded chunk models
-        document_chunks = [Chunk(text=t) for t in text_chunks]
-        new_document = Document(source_url=source_url_or_path, chunks=document_chunks)
-        
-        # 3. Create embeddings for Pinecone
-        chunk_texts_for_embedding = [chunk.text for chunk in document_chunks]
-        chunk_embeddings = self.embeddings_model.embed_documents(chunk_texts_for_embedding)
-        
-        # 4. Prepare vectors for Pinecone upsert
-        pinecone_vectors = []
-        for i, chunk in enumerate(document_chunks):
-            pinecone_vectors.append({
-                "id": chunk.chunk_id, # Link using the unique chunk ID
-                "values": chunk_embeddings[i],
-                "metadata": {"text": chunk.text}
-            })
+        async def _process_new_document(self, source_url_or_path: str) -> Document:
+            print(f"Processing new document from {source_url_or_path}...")
+            
+            document_text = self._get_text_from_source(source_url_or_path)
+            
+            # 1. Chunk the text
+            text_chunks = self.text_splitter.split_text(document_text)
+            
+            # 2. Create MongoDB document and embedded chunk models
+            document_chunks = [Chunk(text=t) for t in text_chunks]
+            new_document = Document(source_url=source_url_or_path, chunks=document_chunks)
+            
+            # 3. Create embeddings for Pinecone
+            chunk_texts_for_embedding = [chunk.text for chunk in document_chunks]
+            chunk_embeddings = self.embeddings_model.embed_documents(chunk_texts_for_embedding)
+            
+            # 4. Prepare vectors for Pinecone upsert
+            pinecone_vectors = []
+            for i, chunk in enumerate(document_chunks):
+                pinecone_vectors.append({
+                    "id": chunk.chunk_id,
+                    "values": chunk_embeddings[i],
+                    "metadata": {"text": chunk.text}
+                })
 
-        # 5. Upsert to Pinecone
-        pinecone_index = pinecone_client.get_index()
-        if pinecone_vectors:
-            pinecone_index.upsert(vectors=pinecone_vectors)
-        
-        # 6. Insert the complete document with embedded chunks into MongoDB
-        await new_document.insert()
-        
-        print(f"Successfully processed and stored new document with {len(text_chunks)} chunks.")
-        return new_document
+            # --- THIS IS THE NEW BATCHING LOGIC ---
+            # 5. Batch upsert to Pinecone to avoid size limits
+            pinecone_index = pinecone_client.get_index()
+            if pinecone_vectors:
+                # Upsert in batches of 100 or less
+                batch_size = 100 
+                print(f"Uploading {len(pinecone_vectors)} vectors in batches of {batch_size}...")
+                for i in range(0, len(pinecone_vectors), batch_size):
+                    batch = pinecone_vectors[i:i + batch_size]
+                    print(f"Upserting batch {i//batch_size + 1}...")
+                    pinecone_index.upsert(vectors=batch)
+            
+            # 6. Insert the complete document with embedded chunks into MongoDB
+            await new_document.insert()
+            
+            print(f"Successfully processed and stored new document with {len(text_chunks)} chunks.")
+            return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
         # Check if the document exists in MongoDB, otherwise process and store it.

@@ -15,7 +15,7 @@ class DocumentService:
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
         # Use a larger chunk size to keep context together, with a good overlap
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200,separators=["\n\n", "\n", ". ", " ", ""])
 
     # ... (The _get_text_from_source and _process_new_document methods remain the same) ...
     

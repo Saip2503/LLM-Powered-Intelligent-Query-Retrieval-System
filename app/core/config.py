@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     # --- LLM ---
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY")
 
+    # --- Cohere ---
+    COHERE_API_KEY: str = os.getenv("COHERE_API_KEY")
     class Config:
         case_sensitive = True
         env_file = ".env"

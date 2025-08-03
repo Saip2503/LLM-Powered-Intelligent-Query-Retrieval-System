@@ -67,29 +67,52 @@ class DocumentService:
 
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """Answers a question using RAG (Re-ranker Disabled)."""
+        """
+        Answers a question using a RAG pipeline with a fallback mechanism for the re-ranker.
+        """
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
 
-        # Embed the user's question
+        # 1. Embed the user's question and retrieve initial documents
         question_embedding = self.embeddings_model.embed_query(question)
-
-        # Query Pinecone to retrieve relevant chunks
         pinecone_index = pinecone_client.get_index()
         query_response = pinecone_index.query(
             vector=question_embedding,
-            top_k=7, # Retrieve 7 chunks
+            top_k=20,  # Retrieve a larger set of initial candidates
             include_metadata=True
         )
         
-        context_chunks = [match['metadata']['text'] for match in query_response['matches']]
-        context = "\n---\n".join(context_chunks)
-        
-        if not context:
+        initial_docs = [match['metadata']['text'] for match in query_response['matches']]
+
+        if not initial_docs:
             return "Could not find relevant information in the document to answer the question."
 
-        # Generate the final answer with Gemini
+        context_chunks = []
+        
+        # --- NEW: FALLBACK LOGIC ---
+        # 2. Try to use the Cohere re-ranker
+        try:
+            co = cohere.Client(settings.COHERE_API_KEY)
+            print("Attempting to re-rank documents with Cohere...")
+            reranked_results = co.rerank(
+                query=question,
+                documents=initial_docs,
+                top_n=5,
+                model="rerank-english-v2.0"
+            )
+            context_chunks = [result.document['text'] for result in reranked_results.results]
+            print("Successfully re-ranked documents.")
+        except Exception as e:
+            # 3. If it fails (e.g., trial limit reached), fall back gracefully
+            print(f"WARNING: Cohere re-ranker failed: {e}. Falling back to standard retrieval.")
+            # Use the top 7 documents from the initial Pinecone search instead
+            context_chunks = initial_docs[:7]
+        # --- END OF FALLBACK LOGIC ---
+
+        context = "\n---\n".join(context_chunks)
+        
+        # 4. Generate the final answer with Gemini
         prompt = f"""
         You are a meticulous assistant. Answer the question based ONLY on the provided context.
         If the answer is not found, state: "The information is not available in the provided document."
@@ -104,4 +127,5 @@ class DocumentService:
         """
         response = await self.llm.ainvoke(prompt)
         return response.content
+
 document_service = DocumentService()

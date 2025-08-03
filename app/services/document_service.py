@@ -4,7 +4,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from app.db_mongo.model import Document, Chunk
 from app.vector_db.pinecone_client import pinecone_client
-
+import cohere 
+from app.core.config import settings
 class DocumentService:
     def __init__(self):
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0)
@@ -63,26 +64,45 @@ class DocumentService:
         print(f"Successfully processed and stored new document with {len(text_chunks)} chunks.")
         return new_document
 
+
     async def answer_question(self, document_source: str, question: str) -> str:
-        """Answers a question using the RAG pipeline."""
+        # Initialize the Cohere client
+        co = cohere.Client(settings.COHERE_API_KEY)
+
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
 
+        # Step 1: Embed the user's question
         question_embedding = self.embeddings_model.embed_query(question)
 
+        # Step 2: Retrieve a larger number of documents from Pinecone
         pinecone_index = pinecone_client.get_index()
         query_response = pinecone_index.query(
             vector=question_embedding,
-            top_k=5,
+            top_k=20,  # Get more initial results for the re-ranker to work with
             include_metadata=True
         )
         
-        context = "\n---\n".join([match['metadata']['text'] for match in query_response['matches']])
-        
-        if not context:
+        initial_docs = [match['metadata']['text'] for match in query_response['matches']]
+
+        if not initial_docs:
             return "Could not find relevant information in the document to answer the question."
 
+        # Step 3: Re-rank the results using Cohere
+        print(f"Re-ranking {len(initial_docs)} documents...")
+        reranked_results = co.rerank(
+            query=question,
+            documents=initial_docs,
+            top_n=5,  # Return the top 5 most relevant documents
+            model="rerank-english-v2.0"
+        )
+
+        # Step 4: Build the final context from the top re-ranked documents
+        context_chunks = [result.document['text'] for result in reranked_results.results]
+        context = "\n---\n".join(context_chunks)
+        
+        # Step 5: Generate the final answer with Gemini
         prompt = f"""
         You are a meticulous assistant. Answer the question based ONLY on the provided context.
         If the answer is not found, state: "The information is not available in the provided document."
@@ -97,5 +117,4 @@ class DocumentService:
         """
         response = await self.llm.ainvoke(prompt)
         return response.content
-
 document_service = DocumentService()

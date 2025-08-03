@@ -17,3 +17,4 @@ requests
 pydantic-settings
 beanie
 motor
+cohere

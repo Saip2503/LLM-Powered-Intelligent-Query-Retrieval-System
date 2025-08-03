@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
+from google.api_core import exceptions as google_exceptions
 from app.core.config import settings
 from app.schemas.schemas import SubmissionRequest, SubmissionResponse
 from app.services.document_service import document_service
@@ -30,13 +30,22 @@ async def run_submission(
     answers = []
     for question in request.questions:
         try:
-            # --- THIS IS THE CORRECTED LINE ---
             answer = await document_service.answer_question(
-                document_source=request.documents, # Use the correct parameter name
+                document_source=request.documents,
                 question=question
             )
             answers.append(answer)
         except Exception as e:
-            answers.append(f"An error occurred while processing this question: {str(e)}")
+            # --- NEW, MORE DETAILED ERROR HANDLING ---
+            error_message = f"An unexpected error occurred: {str(e)}"
+            
+            # Check if it's a Google API error and extract details
+            if isinstance(e, google_exceptions.GoogleAPICallError):
+                error_message = f"Google API Error: {e.message}"
+            
+            # Add more specific checks for other libraries if needed
+            
+            print(f"ERROR processing question '{question}': {error_message}")
+            answers.append(error_message)
             
     return SubmissionResponse(answers=answers)

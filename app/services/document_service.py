@@ -9,10 +9,16 @@ import cohere
 from app.core.config import settings
 class DocumentService:
     def __init__(self):
+        """
+        Final optimized configuration.
+        """
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+        # Use a larger chunk size to keep context together, with a good overlap
+        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
+    # ... (The _get_text_from_source and _process_new_document methods remain the same) ...
+    
     def _get_text_from_source(self, source: str) -> str:
         """Gets text content from either a URL or a local file path."""
         try:
@@ -68,54 +74,54 @@ class DocumentService:
 
     async def answer_question(self, document_source: str, question: str) -> str:
         """
-        Answers a question using a RAG pipeline with a fallback mechanism for the re-ranker.
+        Final optimized RAG pipeline with Multi-Query, Re-ranking, and Fallback logic.
         """
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
 
-        # 1. Embed the user's question and retrieve initial documents
-        question_embedding = self.embeddings_model.embed_query(question)
+        # 1. Multi-Query Generation
+        query_generation_prompt = f"Generate 3 alternative versions of this question for a document search: {question}"
+        query_generation_response = await self.llm.ainvoke(query_generation_prompt)
+        all_queries = [question] + query_generation_response.content.strip().split('\n')
+        
+        # 2. Retrieve for all queries
+        query_embeddings = self.embeddings_model.embed_documents(all_queries)
+        
+        retrieved_docs_metadata = {}
         pinecone_index = pinecone_client.get_index()
-        query_response = pinecone_index.query(
-            vector=question_embedding,
-            top_k=20,  # Retrieve a larger set of initial candidates
-            include_metadata=True
-        )
+        for embedding in query_embeddings:
+            query_response = pinecone_index.query(
+                vector=embedding, top_k=10, include_metadata=True
+            )
+            for match in query_response['matches']:
+                retrieved_docs_metadata[match['id']] = match['metadata']['text']
         
-        initial_docs = [match['metadata']['text'] for match in query_response['matches']]
-
+        initial_docs = list(retrieved_docs_metadata.values())
         if not initial_docs:
-            return "Could not find relevant information in the document to answer the question."
+            return "Could not find relevant information in the document."
 
+        # 3. Re-rank with fallback
         context_chunks = []
-        
-        # --- NEW: FALLBACK LOGIC ---
-        # 2. Try to use the Cohere re-ranker
         try:
             co = cohere.Client(settings.COHERE_API_KEY)
-            print("Attempting to re-rank documents with Cohere...")
             reranked_results = co.rerank(
-                query=question,
-                documents=initial_docs,
-                top_n=5,
-                model="rerank-english-v2.0"
+                query=question, documents=initial_docs, top_n=7, model="rerank-english-v2.0"
             )
             context_chunks = [result.document['text'] for result in reranked_results.results]
-            print("Successfully re-ranked documents.")
         except Exception as e:
-            # 3. If it fails (e.g., trial limit reached), fall back gracefully
             print(f"WARNING: Cohere re-ranker failed: {e}. Falling back to standard retrieval.")
-            # Use the top 7 documents from the initial Pinecone search instead
             context_chunks = initial_docs[:7]
-        # --- END OF FALLBACK LOGIC ---
 
         context = "\n---\n".join(context_chunks)
         
-        # 4. Generate the final answer with Gemini
+        # 4. Generate with a step-by-step prompt
         prompt = f"""
-        You are a meticulous assistant. Answer the question based ONLY on the provided context.
-        If the answer is not found, state: "The information is not available in the provided document."
+        You are a meticulous assistant. Follow these steps:
+        1. Carefully read the QUESTION and the CONTEXT.
+        2. Identify the specific sentences from the CONTEXT that directly answer the QUESTION.
+        3. If no information is found, your final answer must be "The information is not available in the provided document."
+        4. If information is found, synthesize a concise and direct final answer.
 
         CONTEXT:
         {context}
@@ -123,7 +129,7 @@ class DocumentService:
         QUESTION:
         {question}
 
-        ANSWER:
+        FINAL ANSWER:
         """
         response = await self.llm.ainvoke(prompt)
         return response.content

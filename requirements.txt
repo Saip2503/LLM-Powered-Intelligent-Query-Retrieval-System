@@ -18,3 +18,4 @@ pydantic-settings
 beanie
 motor
 cohere
+rank_bm25

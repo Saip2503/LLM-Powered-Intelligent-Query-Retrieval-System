@@ -19,3 +19,8 @@ beanie
 motor
 cohere
 rank_bm25
+langchain-huggingface
+sentence-transformers
+torch
+transformers
+accelerate

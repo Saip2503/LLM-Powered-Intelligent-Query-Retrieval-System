@@ -1,29 +1,58 @@
 import fitz
 import requests
-from langchain.text_splitter import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+import torch
+import asyncio
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.retrievers import BM25Retriever
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from app.db_mongo.model import Document, Chunk
+# --- UPDATED IMPORTS ---
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+# -----------------------
+from app.db_mongo.models import Document, Chunk
 from app.vector_db.pinecone_client import pinecone_client
 import cohere
 from app.core.config import settings
-from typing import List, Dict, Any
 
 class DocumentService:
     def __init__(self):
         """
-        Final optimized configuration for RAG system.
-        Incorporates advanced chunking, hybrid search, and refined LLM prompting.
+        Final optimized configuration for RAG system using a self-hosted GPT model.
         """
-        self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0)
-        self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        # --- MODEL CONFIGURATION ---
+        generator_model_id = "openai/gpt-oss-20b"
+        embedding_model_id = "sentence-transformers/all-mpnet-base-v2"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Loading models to device: {device}")
 
+        # --- 1. LOAD GENERATOR MODEL (GPT-OSS-20B) ---
+        # This requires a powerful GPU and significant VRAM.
+        generator_tokenizer = AutoTokenizer.from_pretrained(generator_model_id)
+        generator_model = AutoModelForCausalLM.from_pretrained(
+            generator_model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto", # Automatically uses available GPUs
+        )
+        pipe = pipeline(
+            "text-generation",
+            model=generator_model,
+            tokenizer=generator_tokenizer,
+            max_new_tokens=512,
+            temperature=0.1,
+        )
+        self.llm = HuggingFacePipeline(pipeline=pipe)
+
+        # --- 2. LOAD EMBEDDING MODEL ---
+        self.embeddings_model = HuggingFaceEmbeddings(
+            model_name=embedding_model_id,
+            model_kwargs={'device': device}
+        )
+        
+        # --- 3. OTHER COMPONENTS ---
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
-            separators=["\n\n", "\n", ". ", " ", ""] # Prioritize natural breaks
+            separators=["\n\n", "\n", ". ", " ", ""]
         )
-        
         self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
 
     def _get_text_from_source(self, source: str) -> str:
@@ -89,40 +118,38 @@ class DocumentService:
         if not document:
             document = await self._process_new_document(document_source)
 
-        # 1. Advanced Query Transformation: Multi-Query Generation
         query_generation_prompt = f"Generate 3 alternative versions of this question for a document search: {question}"
-        query_generation_response = await self.llm.ainvoke(query_generation_prompt)
-        all_queries = [question] + [q.strip() for q in query_generation_response.content.strip().split('\n') if q.strip()]
+        
+        loop = asyncio.get_running_loop()
+        query_generation_response = await loop.run_in_executor(None, lambda: self.llm.invoke(query_generation_prompt))
+        
+        all_queries = [question] + [q.strip() for q in query_generation_response.strip().split('\n') if q.strip()]
 
-        # 2. Hybrid Search: Combine Vector Search (Pinecone) with Keyword Search (BM25)
-        bm25_docs = [chunk.text for chunk in document.chunks]
-        bm25_retriever = BM25Retriever.from_texts(bm25_docs, k=10)
+        all_chunk_texts = [chunk.text for chunk in document.chunks]
+        bm25_retriever = BM25Retriever.from_texts(all_chunk_texts, k=10)
 
-        retrieved_docs_metadata = {}
+        retrieved_docs_text = set()
         pinecone_index = pinecone_client.get_index()
 
-        # Perform vector search for all queries
         for query_text in all_queries:
             query_embedding = self.embeddings_model.embed_query(query_text)
             query_response = pinecone_index.query(
                 vector=query_embedding, top_k=10, include_metadata=True
             )
             for match in query_response['matches']:
-                retrieved_docs_metadata[match['id']] = match['metadata']['text']
+                retrieved_docs_text.add(match['metadata']['text'])
 
-            # Perform BM25 search and add results to the pool
             bm25_results = bm25_retriever.invoke(query_text)
             for doc in bm25_results:
-                if doc.page_content not in retrieved_docs_metadata.values():
-                    retrieved_docs_metadata[f"bm25_{hash(doc.page_content)}"] = doc.page_content
+                retrieved_docs_text.add(doc.page_content)
 
-        initial_docs = list(retrieved_docs_metadata.values())
+        initial_docs = list(retrieved_docs_text)
         if not initial_docs:
             return "Could not find relevant information in the document."
 
-        # 3. Re-rank with Cohere
         context_chunks = []
         try:
+            print(f"Re-ranking {len(initial_docs)} combined documents...")
             reranked_results = self.cohere_client.rerank(
                 query=question, documents=initial_docs, top_n=7, model="rerank-english-v2.0"
             )
@@ -133,31 +160,17 @@ class DocumentService:
 
         context = "\n---\n".join(context_chunks)
 
-        # 4. Advanced Prompt Engineering for Precision and Factual Integrity
         prompt = f"""
-        You are a meticulous and highly accurate assistant specializing in insurance, legal, HR, and compliance.
-        Your primary goal is to provide precise, factually grounded answers based only on the provided CONTEXT.
-        Follow these steps rigorously:
-
-        1.  *Analyze the QUESTION:* Understand the user's intent and identify key entities or concepts.
-        2.  *Evaluate CONTEXT Relevance:* Carefully read through each piece of provided CONTEXT. Determine which sentences or phrases directly address the QUESTION.
-        3.  *Synthesize Answer (Step-by-Step - Chain of Thought):*
-            * If the QUESTION requires multi-step reasoning, break down your thought process into clear, logical steps.
-            * Extract specific sentences or data points from the CONTEXT that directly support each step of your reasoning.
-            * Combine these extracted pieces of information to form a comprehensive and coherent answer.
-            * *Crucially, do NOT introduce any information not explicitly present in the CONTEXT.*
-            * If a direct answer or supporting information is not found in the CONTEXT, state that clearly.
-        4.  *Format FINAL ANSWER:* Present your answer concisely and directly.
-
+        You are a meticulous and highly accurate assistant...
         CONTEXT:
         {context}
-
         QUESTION:
         {question}
-
         FINAL ANSWER:
         """
-        response = await self.llm.ainvoke(prompt)
-        return response.content
+        
+        # Run the final generation in a thread to avoid blocking
+        response = await loop.run_in_executor(None, lambda: self.llm.invoke(prompt))
+        return response
 
 document_service = DocumentService()

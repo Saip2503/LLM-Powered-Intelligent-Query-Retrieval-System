@@ -5,7 +5,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.retrievers import BM25Retriever
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from app.core.config import settings
-from app.db_mongo.models import Document, Chunk
+from app.db_mongo.model import Document, Chunk
 from app.vector_db.pinecone_client import pinecone_client
 
 class DocumentService:

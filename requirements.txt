@@ -9,5 +9,6 @@ pinecone
 rank_bm25
 langchain
 langchain-google-genai
+langchain-community 
 cohere
 PyMuPDF

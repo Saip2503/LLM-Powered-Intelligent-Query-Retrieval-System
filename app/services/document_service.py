@@ -95,8 +95,8 @@ class DocumentService:
         reranked_results = self.cohere_client.rerank(
             query=question,
             documents=initial_docs,
-            top_n=5,  # Return the top 5 most relevant documents
-            model="rerank-english-v2.0"
+            top_n=7,  # Return the top 5 most relevant documents
+            model="rerank-english-v3.0"
         )
         context_chunks = [result.document['text'] for result in reranked_results.results]
         context = "\n---\n".join(context_chunks)

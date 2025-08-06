@@ -1,7 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
 from app.core.config import settings
-from .model import Document  # Import your Beanie models
+from .models import Document  # Import your Beanie models
 
 async def init_db():
     """

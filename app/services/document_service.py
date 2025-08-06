@@ -12,8 +12,12 @@ class DocumentService:
     def __init__(self):
         """
         Final optimized configuration for RAG system.
+        Using Gemini 1.5 Flash for speed and Gemini Pro for embedding quality.
         """
-        self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
+        
+        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+        # -----------------------------------------------------------
+        
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -106,11 +110,9 @@ class DocumentService:
                 vector=query_embedding, top_k=10, include_metadata=True
             )
             
-            # --- FIX: Add a check to ensure the response is valid ---
             if query_response and query_response['matches']:
                 for match in query_response['matches']:
                     retrieved_docs_metadata[match['id']] = match['metadata']['text']
-            # ---------------------------------------------------------
 
             # Perform BM25 search and add results to the pool
             bm25_results = bm25_retriever.invoke(query_text)

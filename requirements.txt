@@ -1,25 +1,13 @@
-
---- Backend & Server ---
 fastapi
 uvicorn[standard]
-
---- Configuration & HTTP ---
 python-dotenv
 pydantic-settings
 requests
-
---- Database (MongoDB) ---
 beanie
 motor
-
---- Vector DB & Search ---
 pinecone
-rank_bm25 # For BM25 keyword search
-
---- AI / LLM Frameworks ---
+rank_bm25
 langchain
-langchain-google-genai # For Google Gemini models
-cohere # For the re-ranker
-
---- Document Processing ---
+langchain-google-genai
+cohere
 PyMuPDF

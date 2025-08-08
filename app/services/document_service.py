@@ -67,7 +67,7 @@ class DocumentService:
             pinecone_vectors.append({
                 "id": child_chunk.chunk_id,
                 "values": child_embeddings[i],
-                "metadata": {} # No need to store text here anymore
+                "metadata": {}
             })
 
         pinecone_index = pinecone_client.get_index()
@@ -101,13 +101,13 @@ class DocumentService:
             for child in parent.children
         }
         parent_texts = [parent.text for parent in document.parent_chunks]
+        all_child_texts = [child.text for parent in document.parent_chunks for child in parent.children]
+        child_text_to_id_map = {child.text: child.chunk_id for parent in document.parent_chunks for child in parent.children}
 
         # 3. Perform Hybrid Search
-        # 3a. Keyword search on PARENT chunks
         bm25_retriever = BM25Retriever.from_texts(parent_texts, k=10)
         keyword_retrieved_parents = {doc.page_content for query in all_queries for doc in bm25_retriever.invoke(query)}
 
-        # 3b. Vector search on CHILD chunks
         vector_retrieved_parent_texts = set()
         pinecone_index = pinecone_client.get_index()
         query_embeddings = self.embeddings_model.embed_documents(all_queries)
@@ -120,7 +120,6 @@ class DocumentService:
                     if parent_text:
                         vector_retrieved_parent_texts.add(parent_text)
         
-        # 3c. Combine results into a single pool for the re-ranker
         initial_docs = list(keyword_retrieved_parents.union(vector_retrieved_parent_texts))
 
         if not initial_docs:
@@ -130,7 +129,14 @@ class DocumentService:
         reranked_results = self.cohere_client.rerank(
             query=question, documents=initial_docs, top_n=5, model="rerank-english-v3.0"
         )
-        context_chunks = [result.document['text'] for result in reranked_results.results]
+        
+        # --- THIS IS THE FIX ---
+        # Add a check to ensure result.document is not None before accessing it
+        context_chunks = [
+            result.document['text'] for result in reranked_results.results if result.document
+        ]
+        # --- END OF FIX ---
+        
         context = "\n---\n".join(context_chunks)
         
         # 5. Generate Final Answer

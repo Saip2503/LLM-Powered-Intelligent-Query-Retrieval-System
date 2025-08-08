@@ -10,7 +10,7 @@ from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """High-accuracy configuration using Parent Document chunking and Hybrid Search."""
+        """High-accuracy configuration using a true Hybrid Parent-Child RAG pipeline."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
@@ -23,13 +23,14 @@ class DocumentService:
         """Gets text content from either a URL or a local file path."""
         try:
             if source.startswith("http://") or source.startswith("https://"):
-                response = requests.get(source, timeout=45)
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+                response = requests.get(source, headers=headers, timeout=45)
                 response.raise_for_status()
                 with fitz.open(stream=response.content, filetype="pdf") as doc:
-                    return "".join(page.get_text() for page in doc)
+                    return "".join(page.get_text() for page in doc if page.get_text())
             else:
                 with fitz.open(source) as doc:
-                    return "".join(page.get_text() for page in doc)
+                    return "".join(page.get_text() for page in doc if page.get_text())
         except Exception as e:
             print(f"Error reading from source {source}: {e}")
             raise
@@ -66,7 +67,7 @@ class DocumentService:
             pinecone_vectors.append({
                 "id": child_chunk.chunk_id,
                 "values": child_embeddings[i],
-                "metadata": {"text": child_chunk.text}
+                "metadata": {} # No need to store text here anymore
             })
 
         pinecone_index = pinecone_client.get_index()
@@ -80,7 +81,7 @@ class DocumentService:
         return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """High-accuracy RAG pipeline with Parent Document Retrieval."""
+        """High-accuracy RAG pipeline with a true Hybrid Parent-Child Retrieval."""
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
@@ -92,55 +93,44 @@ class DocumentService:
         query_generation_prompt = f"Generate 3 alternative versions of this question for a document search: {question}"
         query_generation_response = await self.llm.ainvoke(query_generation_prompt)
         all_queries = [question] + [q.strip() for q in query_generation_response.content.strip().split('\n') if q.strip()]
-
-        # 2. Hybrid Search on CHILD chunks
-        all_child_chunks = [child for parent in document.parent_chunks for child in parent.children]
-        all_child_texts = [chunk.text for chunk in all_child_chunks]
         
-        bm25_retriever = BM25Retriever.from_texts(all_child_texts, k=15)
-        
-        # --- OPTIMIZATION: Create efficient lookup maps ONCE before the loop ---
+        # 2. Build lookup maps for efficient retrieval
         child_to_parent_map = {
             child.chunk_id: parent.text 
             for parent in document.parent_chunks 
             for child in parent.children
         }
-        child_text_to_id_map = {child.text: child.chunk_id for child in all_child_chunks}
-        # --------------------------------------------------------------------
-        
-        retrieved_child_ids = set()
-        pinecone_index = pinecone_client.get_index()
+        parent_texts = [parent.text for parent in document.parent_chunks]
 
-        for query_text in all_queries:
-            # Vector search
-            query_embedding = self.embeddings_model.embed_query(query_text)
-            query_response = pinecone_index.query(vector=query_embedding, top_k=15, include_metadata=False)
+        # 3. Perform Hybrid Search
+        # 3a. Keyword search on PARENT chunks
+        bm25_retriever = BM25Retriever.from_texts(parent_texts, k=10)
+        keyword_retrieved_parents = {doc.page_content for query in all_queries for doc in bm25_retriever.invoke(query)}
+
+        # 3b. Vector search on CHILD chunks
+        vector_retrieved_parent_texts = set()
+        pinecone_index = pinecone_client.get_index()
+        query_embeddings = self.embeddings_model.embed_documents(all_queries)
+
+        for embedding in query_embeddings:
+            query_response = pinecone_index.query(vector=embedding, top_k=10, include_metadata=False)
             if query_response and query_response.get('matches'):
                 for match in query_response['matches']:
-                    retrieved_child_ids.add(match['id'])
-            
-            # Keyword search with efficient mapping
-            bm25_results = bm25_retriever.invoke(query_text)
-            for doc in bm25_results:
-                child_id = child_text_to_id_map.get(doc.page_content)
-                if child_id:
-                    retrieved_child_ids.add(child_id)
-                        
-        # 3. Retrieve PARENT Chunks
-        parent_texts_to_rerank = {child_to_parent_map.get(child_id) for child_id in retrieved_child_ids if child_to_parent_map.get(child_id)}
-        initial_docs = list(parent_texts_to_rerank)
+                    parent_text = child_to_parent_map.get(match['id'])
+                    if parent_text:
+                        vector_retrieved_parent_texts.add(parent_text)
+        
+        # 3c. Combine results into a single pool for the re-ranker
+        initial_docs = list(keyword_retrieved_parents.union(vector_retrieved_parent_texts))
 
         if not initial_docs:
             return "Could not find relevant information in the document."
 
-        # 4. Re-rank the PARENT chunks
+        # 4. Re-rank the combined PARENT chunks
         reranked_results = self.cohere_client.rerank(
             query=question, documents=initial_docs, top_n=5, model="rerank-english-v3.0"
         )
-        # Add a check to ensure result.document is not None before accessing it
-        context_chunks = [
-            result.document['text'] for result in reranked_results.results if result.document
-        ]
+        context_chunks = [result.document['text'] for result in reranked_results.results]
         context = "\n---\n".join(context_chunks)
         
         # 5. Generate Final Answer

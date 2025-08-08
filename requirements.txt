@@ -11,3 +11,4 @@ langchain
 langchain-google-genai
 cohere
 PyMuPDF
+langchain-community

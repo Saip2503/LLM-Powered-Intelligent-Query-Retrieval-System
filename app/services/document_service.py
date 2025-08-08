@@ -138,6 +138,10 @@ class DocumentService:
             query=question, documents=initial_docs, top_n=5, model="rerank-english-v3.0"
         )
         context_chunks = [result.document['text'] for result in reranked_results.results]
+        # Add a check to ensure result.document is not None before accessing it
+        context_chunks = [
+            result.document['text'] for result in reranked_results.results if result.document
+        ]
         context = "\n---\n".join(context_chunks)
         
         # 5. Generate Final Answer

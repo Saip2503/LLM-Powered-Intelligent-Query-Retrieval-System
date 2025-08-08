@@ -1,34 +1,31 @@
 import fitz
 import requests
+import cohere
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.retrievers import BM25Retriever
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from app.db_mongo.models import Document, Chunk
+from app.db_mongo.models import Document, ParentChunk, ChildChunk
 from app.vector_db.pinecone_client import pinecone_client
 from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """
-        A simplified, robust, and optimized configuration for a high-performance RAG system.
-        """
-        # Use the most powerful model for generation to maximize accuracy
+        """High-accuracy configuration using Parent Document chunking and Hybrid Search."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
-        
-        # Use Google's best embedding model
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
-        # Use a balanced chunking strategy
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", ". ", " ", ""]
-        )
+        # Splitter for large, context-rich parent chunks
+        self.parent_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=400)
+        # Splitter for small, precise child chunks for vector search
+        self.child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=100)
+        
+        self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
 
     def _get_text_from_source(self, source: str) -> str:
         """Gets text content from either a URL or a local file path."""
         try:
             if source.startswith("http://") or source.startswith("https://"):
-                response = requests.get(source, timeout=45) # Increased timeout
+                response = requests.get(source, timeout=45)
                 response.raise_for_status()
                 with fitz.open(stream=response.content, filetype="pdf") as doc:
                     return "".join(page.get_text() for page in doc)
@@ -40,76 +37,113 @@ class DocumentService:
             raise
 
     async def _process_new_document(self, source_url_or_path: str) -> Document:
-        """Processes a new document and stores it in the databases."""
-        print(f"Processing new document from {source_url_or_path}...")
+        """Processes a new document using the Parent Document chunking strategy."""
+        print(f"Processing new document with Parent-Child strategy from {source_url_or_path}...")
         document_text = self._get_text_from_source(source_url_or_path)
         
-        text_chunks = self.text_splitter.split_text(document_text)
-        document_chunks = [Chunk(text=t) for t in text_chunks]
-        new_document = Document(source_url=source_url_or_path, chunks=document_chunks)
+        # 1. Create large parent chunks
+        parent_texts = self.parent_splitter.split_text(document_text)
         
-        chunk_texts_for_embedding = [chunk.text for chunk in document_chunks]
-        chunk_embeddings = self.embeddings_model.embed_documents(chunk_texts_for_embedding)
+        new_document = Document(source_url=source_url_or_path, parent_chunks=[])
         
+        all_child_chunks = []
         pinecone_vectors = []
-        for i, chunk in enumerate(document_chunks):
+
+        # 2. Create small child chunks for each parent
+        for parent_text in parent_texts:
+            parent_chunk = ParentChunk(text=parent_text, children=[])
+            
+            child_texts = self.child_splitter.split_text(parent_text)
+            for child_text in child_texts:
+                child_chunk = ChildChunk(text=child_text)
+                parent_chunk.children.append(child_chunk)
+                all_child_chunks.append(child_chunk)
+
+            new_document.parent_chunks.append(parent_chunk)
+
+        # 3. Embed ONLY the child chunks
+        child_texts_for_embedding = [chunk.text for chunk in all_child_chunks]
+        child_embeddings = self.embeddings_model.embed_documents(child_texts_for_embedding)
+
+        for i, child_chunk in enumerate(all_child_chunks):
             pinecone_vectors.append({
-                "id": chunk.chunk_id, "values": chunk_embeddings[i], "metadata": {"text": chunk.text}
+                "id": child_chunk.chunk_id,
+                "values": child_embeddings[i],
+                "metadata": {"text": child_chunk.text} # Store child text for BM25
             })
 
+        # 4. Batch upsert child vectors to Pinecone
         pinecone_index = pinecone_client.get_index()
         if pinecone_vectors:
             batch_size = 100
             for i in range(0, len(pinecone_vectors), batch_size):
-                batch = pinecone_vectors[i:i + batch_size]
-                pinecone_index.upsert(vectors=batch)
+                pinecone_index.upsert(vectors=pinecone_vectors[i:i + batch_size])
         
+        # 5. Store the complete document structure in MongoDB
         await new_document.insert()
-        print(f"Successfully processed and stored new document with {len(text_chunks)} chunks.")
+        print(f"Successfully processed document with {len(new_document.parent_chunks)} parent chunks and {len(all_child_chunks)} child chunks.")
         return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """
-        Simplified and optimized RAG pipeline.
-        """
+        """High-accuracy RAG pipeline with Parent Document Retrieval."""
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
 
-        # 1. Embed the user's question
-        question_embedding = self.embeddings_model.embed_query(question)
+        # 1. Multi-Query Generation
+        query_generation_prompt = f"Generate 3 alternative versions of this question for a document search: {question}"
+        query_generation_response = await self.llm.ainvoke(query_generation_prompt)
+        all_queries = [question] + [q.strip() for q in query_generation_response.content.strip().split('\n') if q.strip()]
 
-        # 2. Retrieve a larger number of relevant chunks from Pinecone
-        pinecone_index = pinecone_client.get_index()
-        query_response = pinecone_index.query(
-            vector=question_embedding,
-            top_k=15, # Retrieve more candidates to ensure context is found
-            include_metadata=True
-        )
+        # 2. Hybrid Search on CHILD chunks
+        all_child_chunks = [child for parent in document.parent_chunks for child in parent.children]
+        all_child_texts = [chunk.text for chunk in all_child_chunks]
         
-        # Add a defensive check for the response structure
-        if not query_response or not query_response.get('matches'):
-            return "Could not retrieve any information from the document."
+        bm25_retriever = BM25Retriever.from_texts(all_child_texts, k=15)
+        
+        retrieved_child_ids = set()
+        pinecone_index = pinecone_client.get_index()
 
-        context_chunks = [match['metadata']['text'] for match in query_response['matches']]
+        for query_text in all_queries:
+            # Vector search
+            query_embedding = self.embeddings_model.embed_query(query_text)
+            query_response = pinecone_index.query(vector=query_embedding, top_k=15, include_metadata=False)
+            if query_response and query_response.get('matches'):
+                for match in query_response['matches']:
+                    retrieved_child_ids.add(match['id'])
+            
+            # Keyword search (Note: This is a simplified mapping)
+            bm25_results = bm25_retriever.invoke(query_text)
+            for doc in bm25_results:
+                for child in all_child_chunks:
+                    if child.text == doc.page_content:
+                        retrieved_child_ids.add(child.chunk_id)
+                        break
+                        
+        # 3. Retrieve PARENT Chunks
+        child_to_parent_map = {
+            child.chunk_id: parent.text 
+            for parent in document.parent_chunks 
+            for child in parent.children
+        }
+        
+        parent_texts_to_rerank = {child_to_parent_map.get(child_id) for child_id in retrieved_child_ids if child_to_parent_map.get(child_id)}
+        initial_docs = list(parent_texts_to_rerank)
+
+        if not initial_docs:
+            return "Could not find relevant information in the document."
+
+        # 4. Re-rank the PARENT chunks
+        reranked_results = self.cohere_client.rerank(
+            query=question, documents=initial_docs, top_n=5, model="rerank-english-v3.0"
+        )
+        context_chunks = [result.document['text'] for result in reranked_results.results]
         context = "\n---\n".join(context_chunks)
         
-        if not context:
-            return "Could not find relevant information in the document to answer the question."
-
-        # 3. Use the powerful LLM and an improved prompt to generate the answer
+        # 5. Generate Final Answer
         prompt = f"""
-        You are a meticulous and highly accurate assistant specializing in insurance, legal, HR, and compliance.
-        Your primary goal is to provide precise, factually grounded answers based only on the provided CONTEXT.
-        Follow these steps rigorously:
-
-        1.  **Analyze the QUESTION:** Understand the user's intent and identify the key entities or concepts being asked about.
-        2.  **Evaluate CONTEXT Relevance:** Carefully read through each piece of provided CONTEXT. Systematically identify and extract only the sentences or phrases that directly address the QUESTION. Ignore any irrelevant information.
-        3.  **Synthesize the Answer:**
-            * Combine the extracted, relevant pieces of information to form a comprehensive and coherent answer.
-            * *Crucially, do NOT introduce any information not explicitly present in the CONTEXT.*
-            * If, after careful evaluation, no sentence in the CONTEXT can answer the QUESTION, you MUST state: "The information is not available in the provided document."
-        4.  **Format the FINAL ANSWER:** Present your answer concisely and directly.
+        You are a meticulous assistant. Analyze the CONTEXT to answer the QUESTION.
+        If the answer is not present, state: "The information is not available in the provided document."
 
         CONTEXT:
         {context}

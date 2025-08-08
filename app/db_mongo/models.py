@@ -18,7 +18,7 @@ class ParentChunk(BaseModel):
 class Document(BeanieDocument):
     """Represents a processed document, now containing parent chunks."""
     source_url: Annotated[str, Indexed(unique=True)]
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.utcnow)
     parent_chunks: List[ParentChunk] = []
 
     class Settings:

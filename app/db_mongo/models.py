@@ -20,6 +20,6 @@ class Document(BeanieDocument):
     source_url: Annotated[str, Indexed(unique=True)]
     created_at: datetime = Field(default_factory=lambda: datetime.utcnow)
     parent_chunks: List[ParentChunk] = []
-
+    created_at: datetime = Field(default_factory=datetime.utcnow)
     class Settings:
         name = "documents"

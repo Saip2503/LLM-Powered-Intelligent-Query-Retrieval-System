@@ -89,57 +89,47 @@ class DocumentService:
         if not document.parent_chunks:
             return "Error: The document is empty or contains no readable text. Cannot process the query."
 
-        # 1. Multi-Query Generation
-        query_generation_prompt = f"Generate 3 alternative versions of this question for a document search: {question}"
-        query_generation_response = await self.llm.ainvoke(query_generation_prompt)
-        all_queries = [question] + [q.strip() for q in query_generation_response.content.strip().split('\n') if q.strip()]
-        
-        # 2. Build lookup maps for efficient retrieval
+        # 1. Build lookup maps for efficient retrieval
         child_to_parent_map = {
             child.chunk_id: parent.text 
             for parent in document.parent_chunks 
             for child in parent.children
         }
         parent_texts = [parent.text for parent in document.parent_chunks]
-        all_child_texts = [child.text for parent in document.parent_chunks for child in parent.children]
-        child_text_to_id_map = {child.text: child.chunk_id for parent in document.parent_chunks for child in parent.children}
 
-        # 3. Perform Hybrid Search
+        # 2. Perform Hybrid Search
+        # 2a. Keyword search on PARENT chunks
         bm25_retriever = BM25Retriever.from_texts(parent_texts, k=10)
-        keyword_retrieved_parents = {doc.page_content for query in all_queries for doc in bm25_retriever.invoke(query)}
+        keyword_retrieved_parents = {doc.page_content for doc in bm25_retriever.invoke(question)}
 
+        # 2b. Vector search on CHILD chunks
         vector_retrieved_parent_texts = set()
         pinecone_index = pinecone_client.get_index()
-        query_embeddings = self.embeddings_model.embed_documents(all_queries)
-
-        for embedding in query_embeddings:
-            query_response = pinecone_index.query(vector=embedding, top_k=10, include_metadata=False)
-            if query_response and query_response.get('matches'):
-                for match in query_response['matches']:
-                    parent_text = child_to_parent_map.get(match['id'])
-                    if parent_text:
-                        vector_retrieved_parent_texts.add(parent_text)
+        query_embedding = self.embeddings_model.embed_query(question)
+        query_response = pinecone_index.query(vector=query_embedding, top_k=10, include_metadata=False)
+        if query_response and query_response.get('matches'):
+            for match in query_response['matches']:
+                parent_text = child_to_parent_map.get(match['id'])
+                if parent_text:
+                    vector_retrieved_parent_texts.add(parent_text)
         
+        # 2c. Combine results into a single pool for the re-ranker
         initial_docs = list(keyword_retrieved_parents.union(vector_retrieved_parent_texts))
 
         if not initial_docs:
             return "Could not find relevant information in the document."
 
-        # 4. Re-rank the combined PARENT chunks
+        # 3. Re-rank the combined PARENT chunks
         reranked_results = self.cohere_client.rerank(
             query=question, documents=initial_docs, top_n=5, model="rerank-english-v3.0"
         )
         
-        # --- THIS IS THE FIX ---
-        # Add a check to ensure result.document is not None before accessing it
         context_chunks = [
             result.document['text'] for result in reranked_results.results if result.document
         ]
-        # --- END OF FIX ---
-        
         context = "\n---\n".join(context_chunks)
         
-        # 5. Generate Final Answer
+        # 4. Generate Final Answer
         prompt = f"""
         You are a meticulous assistant. Analyze the CONTEXT to answer the QUESTION.
         If the answer is not present, state: "The information is not available in the provided document."

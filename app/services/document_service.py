@@ -14,42 +14,25 @@ class DocumentService:
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
-        # Splitter for large, context-rich parent chunks
         self.parent_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=400)
-        # Splitter for small, precise child chunks for vector search
         self.child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=100)
         
         self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
 
     def _get_text_from_source(self, source: str) -> str:
-        """
-        Gets text content from either a URL or a local file path.
-        This version is robust against pages with no text.
-        """
+        """Gets text content from either a URL or a local file path."""
         try:
-            text_parts = []
             if source.startswith("http://") or source.startswith("https://"):
                 response = requests.get(source, timeout=45)
                 response.raise_for_status()
                 with fitz.open(stream=response.content, filetype="pdf") as doc:
-                    for page in doc:
-                        # --- FIX: Check for None before appending ---
-                        page_text = page.get_text()
-                        if page_text:
-                            text_parts.append(page_text)
-                    return "".join(text_parts)
+                    return "".join(page.get_text() for page in doc)
             else:
                 with fitz.open(source) as doc:
-                    for page in doc:
-                        # --- FIX: Check for None before appending ---
-                        page_text = page.get_text()
-                        if page_text:
-                            text_parts.append(page_text)
-                    return "".join(text_parts)
+                    return "".join(page.get_text() for page in doc)
         except Exception as e:
             print(f"Error reading from source {source}: {e}")
             raise
-
 
     async def _process_new_document(self, source_url_or_path: str) -> Document:
         """Processes a new document using the Parent Document chunking strategy."""
@@ -58,7 +41,6 @@ class DocumentService:
         
         if not document_text:
              print(f"WARNING: No text could be extracted from {source_url_or_path}. Skipping.")
-             # Create an empty document so we don't re-process it next time
              empty_doc = Document(source_url=source_url_or_path, parent_chunks=[])
              await empty_doc.insert()
              return empty_doc
@@ -67,8 +49,6 @@ class DocumentService:
         new_document = Document(source_url=source_url_or_path, parent_chunks=[])
         
         all_child_chunks = []
-        pinecone_vectors = []
-
         for parent_text in parent_texts:
             parent_chunk = ParentChunk(text=parent_text, children=[])
             child_texts = self.child_splitter.split_text(parent_text)
@@ -81,6 +61,7 @@ class DocumentService:
         child_texts_for_embedding = [chunk.text for chunk in all_child_chunks]
         child_embeddings = self.embeddings_model.embed_documents(child_texts_for_embedding)
 
+        pinecone_vectors = []
         for i, child_chunk in enumerate(all_child_chunks):
             pinecone_vectors.append({
                 "id": child_chunk.chunk_id,
@@ -98,7 +79,6 @@ class DocumentService:
         print(f"Successfully processed document with {len(new_document.parent_chunks)} parent chunks and {len(all_child_chunks)} child chunks.")
         return new_document
 
-
     async def answer_question(self, document_source: str, question: str) -> str:
         """High-accuracy RAG pipeline with Parent Document Retrieval."""
         document = await Document.find_one(Document.source_url == document_source)
@@ -108,50 +88,59 @@ class DocumentService:
         if not document.parent_chunks:
             return "Error: The document is empty or contains no readable text. Cannot process the query."
 
+        # 1. Multi-Query Generation
         query_generation_prompt = f"Generate 3 alternative versions of this question for a document search: {question}"
         query_generation_response = await self.llm.ainvoke(query_generation_prompt)
         all_queries = [question] + [q.strip() for q in query_generation_response.content.strip().split('\n') if q.strip()]
 
+        # 2. Hybrid Search on CHILD chunks
         all_child_chunks = [child for parent in document.parent_chunks for child in parent.children]
         all_child_texts = [chunk.text for chunk in all_child_chunks]
         
         bm25_retriever = BM25Retriever.from_texts(all_child_texts, k=15)
         
+        # --- OPTIMIZATION: Create efficient lookup maps ONCE before the loop ---
+        child_to_parent_map = {
+            child.chunk_id: parent.text 
+            for parent in document.parent_chunks 
+            for child in parent.children
+        }
+        child_text_to_id_map = {child.text: child.chunk_id for child in all_child_chunks}
+        # --------------------------------------------------------------------
+        
         retrieved_child_ids = set()
         pinecone_index = pinecone_client.get_index()
 
         for query_text in all_queries:
+            # Vector search
             query_embedding = self.embeddings_model.embed_query(query_text)
             query_response = pinecone_index.query(vector=query_embedding, top_k=15, include_metadata=False)
             if query_response and query_response.get('matches'):
                 for match in query_response['matches']:
                     retrieved_child_ids.add(match['id'])
             
+            # Keyword search with efficient mapping
             bm25_results = bm25_retriever.invoke(query_text)
             for doc in bm25_results:
-                for child in all_child_chunks:
-                    if child.text == doc.page_content:
-                        retrieved_child_ids.add(child.chunk_id)
-                        break
+                child_id = child_text_to_id_map.get(doc.page_content)
+                if child_id:
+                    retrieved_child_ids.add(child_id)
                         
-        child_to_parent_map = {
-            child.chunk_id: parent.text 
-            for parent in document.parent_chunks 
-            for child in parent.children
-        }
-        
+        # 3. Retrieve PARENT Chunks
         parent_texts_to_rerank = {child_to_parent_map.get(child_id) for child_id in retrieved_child_ids if child_to_parent_map.get(child_id)}
         initial_docs = list(parent_texts_to_rerank)
 
         if not initial_docs:
             return "Could not find relevant information in the document."
 
+        # 4. Re-rank the PARENT chunks
         reranked_results = self.cohere_client.rerank(
             query=question, documents=initial_docs, top_n=5, model="rerank-english-v3.0"
         )
         context_chunks = [result.document['text'] for result in reranked_results.results]
         context = "\n---\n".join(context_chunks)
         
+        # 5. Generate Final Answer
         prompt = f"""
         You are a meticulous assistant. Analyze the CONTEXT to answer the QUESTION.
         If the answer is not present, state: "The information is not available in the provided document."

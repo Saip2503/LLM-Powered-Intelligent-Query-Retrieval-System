@@ -137,7 +137,6 @@ class DocumentService:
         reranked_results = self.cohere_client.rerank(
             query=question, documents=initial_docs, top_n=5, model="rerank-english-v3.0"
         )
-        context_chunks = [result.document['text'] for result in reranked_results.results]
         # Add a check to ensure result.document is not None before accessing it
         context_chunks = [
             result.document['text'] for result in reranked_results.results if result.document

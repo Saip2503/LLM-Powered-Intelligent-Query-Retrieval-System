@@ -87,18 +87,29 @@ class DocumentService:
             include_metadata=True
         )
         
+        # Add a defensive check for the response structure
+        if not query_response or not query_response.get('matches'):
+            return "Could not retrieve any information from the document."
+
         context_chunks = [match['metadata']['text'] for match in query_response['matches']]
         context = "\n---\n".join(context_chunks)
         
         if not context:
             return "Could not find relevant information in the document to answer the question."
 
-        # 3. Use the powerful LLM and a clear prompt to generate the answer
+        # 3. Use the powerful LLM and an improved prompt to generate the answer
         prompt = f"""
-        You are a meticulous assistant. Your task is to answer the user's question based *exclusively* on the provided context.
-        Analyze the context step-by-step to find the most relevant information.
-        If the answer is not present, you must state: "The information is not available in the provided document."
-        Provide a direct and concise final answer.
+        You are a meticulous and highly accurate assistant specializing in insurance, legal, HR, and compliance.
+        Your primary goal is to provide precise, factually grounded answers based only on the provided CONTEXT.
+        Follow these steps rigorously:
+
+        1.  **Analyze the QUESTION:** Understand the user's intent and identify the key entities or concepts being asked about.
+        2.  **Evaluate CONTEXT Relevance:** Carefully read through each piece of provided CONTEXT. Systematically identify and extract only the sentences or phrases that directly address the QUESTION. Ignore any irrelevant information.
+        3.  **Synthesize the Answer:**
+            * Combine the extracted, relevant pieces of information to form a comprehensive and coherent answer.
+            * *Crucially, do NOT introduce any information not explicitly present in the CONTEXT.*
+            * If, after careful evaluation, no sentence in the CONTEXT can answer the QUESTION, you MUST state: "The information is not available in the provided document."
+        4.  **Format the FINAL ANSWER:** Present your answer concisely and directly.
 
         CONTEXT:
         {context}

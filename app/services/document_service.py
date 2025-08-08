@@ -99,6 +99,11 @@ class DocumentService:
         all_child_chunks = [child for parent in document.parent_chunks for child in parent.children]
         all_child_texts = [chunk.text for chunk in all_child_chunks]
         
+        # --- FIX: Add a check for empty documents to prevent division by zero ---
+        if not all_child_texts:
+            return "Error: The document is empty or contains no readable text. Cannot process the query."
+        # --------------------------------------------------------------------
+        
         bm25_retriever = BM25Retriever.from_texts(all_child_texts, k=15)
         
         retrieved_child_ids = set()

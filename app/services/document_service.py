@@ -22,19 +22,38 @@ class DocumentService:
         self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
 
     def _get_text_from_source(self, source: str) -> str:
-        """Gets text content from either a URL or a local file path."""
-        try:
-            if source.startswith("http://") or source.startswith("https://"):
-                response = requests.get(source, timeout=45)
-                response.raise_for_status()
-                with fitz.open(stream=response.content, filetype="pdf") as doc:
-                    return "".join(page.get_text() for page in doc)
-            else:
-                with fitz.open(source) as doc:
-                    return "".join(page.get_text() for page in doc)
-        except Exception as e:
-            print(f"Error reading from source {source}: {e}")
-            raise
+                """
+                Gets text content from either a URL or a local file path,
+                now with a User-Agent header to mimic a browser.
+                """
+                try:
+                    if source.startswith("http://") or source.startswith("https://"):
+                        print(f"Downloading from URL: {source}")
+                        
+                        # --- FIX: Add a User-Agent header ---
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        }
+                        response = requests.get(source, headers=headers, timeout=45)
+                        # ------------------------------------
+                        
+                        response.raise_for_status()
+                        
+                        # Check if the content is actually a PDF
+                        if 'application/pdf' not in response.headers.get('Content-Type', ''):
+                            print(f"WARNING: URL did not return a PDF. Content-Type: {response.headers.get('Content-Type')}")
+                            # You might want to handle this more gracefully, but for now, we'll let fitz try
+                        
+                        with fitz.open(stream=response.content, filetype="pdf") as doc:
+                            return "".join(page.get_text() for page in doc)
+                    else:
+                        print(f"Reading from local file: {source}")
+                        with fitz.open(source) as doc:
+                            return "".join(page.get_text() for page in doc)
+                except Exception as e:
+                    print(f"Error reading from source {source}: {e}")
+                    raise
+
 
     async def _process_new_document(self, source_url_or_path: str) -> Document:
         """Processes a new document using the Parent Document chunking strategy."""

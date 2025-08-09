@@ -9,12 +9,9 @@ from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """Final, robust RAG configuration using Google's powerful APIs."""
+        """Final, high-accuracy RAG configuration with a robust two-stage retrieval pipeline."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
-        
-        # Reverted to Google's efficient and powerful embedding model
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
 
@@ -40,7 +37,7 @@ class DocumentService:
         document_text = self._get_text_from_source(source_url_or_path)
         
         if not document_text:
-             print(f"WARNING: No text could be extracted. Skipping.")
+             print(f"WARNING: No text could be extracted from {source_url_or_path}. Skipping.")
              empty_doc = Document(source_url=source_url_or_path, chunks=[])
              await empty_doc.insert()
              return empty_doc
@@ -55,7 +52,9 @@ class DocumentService:
         pinecone_vectors = []
         for i, chunk in enumerate(document_chunks):
             pinecone_vectors.append({
-                "id": chunk.chunk_id, "values": chunk_embeddings[i], "metadata": {"text": chunk.text}
+                "id": chunk.chunk_id,
+                "values": chunk_embeddings[i],
+                "metadata": {"text": chunk.text}
             })
 
         pinecone_index = pinecone_client.get_index()
@@ -69,15 +68,15 @@ class DocumentService:
         return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """High-accuracy RAG pipeline with a robust embedding model and re-ranking."""
+        """High-accuracy RAG pipeline with a two-stage retrieval (Vector Search + Re-ranker)."""
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
 
         if not document.chunks:
-            return "Error: The document is empty or contains no readable text."
+            return "Error: The document is empty or contains no readable text. Cannot process the query."
 
-        # 1. Vector Search
+        # 1. Broad Vector Search
         pinecone_index = pinecone_client.get_index()
         query_embedding = self.embeddings_model.embed_query(question)
         query_response = pinecone_index.query(vector=query_embedding, top_k=20, include_metadata=True)
@@ -87,7 +86,7 @@ class DocumentService:
 
         initial_docs = [match['metadata']['text'] for match in query_response['matches']]
         
-        # 2. Re-rank the results
+        # 2. Precise Re-ranking
         reranked_results = self.cohere_client.rerank(
             query=question, documents=initial_docs, top_n=7, model="rerank-english-v3.0"
         )

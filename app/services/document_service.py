@@ -1,17 +1,27 @@
 import fitz
 import requests
 import cohere
+import torch
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_huggingface import HuggingFaceEmbeddings
 from app.db_mongo.models import Document, Chunk
 from app.vector_db.pinecone_client import pinecone_client
 from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """Final, high-accuracy RAG configuration with a robust two-stage retrieval pipeline."""
+        """Final, high-accuracy RAG configuration with a specialized embedding model."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
-        self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        
+        # --- NEW SPECIALIZED EMBEDDING MODEL ---
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.embeddings_model = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-mpnet-base-v2",
+            model_kwargs={'device': device}
+        )
+        # ------------------------------------
+
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
 
@@ -32,12 +42,12 @@ class DocumentService:
             raise
 
     async def _process_new_document(self, source_url_or_path: str) -> Document:
-        """Processes a new document with standard chunking."""
+        """Processes a new document with the new embedding model."""
         print(f"Processing new document from {source_url_or_path}...")
         document_text = self._get_text_from_source(source_url_or_path)
         
         if not document_text:
-             print(f"WARNING: No text could be extracted from {source_url_or_path}. Skipping.")
+             print(f"WARNING: No text could be extracted. Skipping.")
              empty_doc = Document(source_url=source_url_or_path, chunks=[])
              await empty_doc.insert()
              return empty_doc
@@ -52,9 +62,7 @@ class DocumentService:
         pinecone_vectors = []
         for i, chunk in enumerate(document_chunks):
             pinecone_vectors.append({
-                "id": chunk.chunk_id,
-                "values": chunk_embeddings[i],
-                "metadata": {"text": chunk.text}
+                "id": chunk.chunk_id, "values": chunk_embeddings[i], "metadata": {"text": chunk.text}
             })
 
         pinecone_index = pinecone_client.get_index()
@@ -68,15 +76,15 @@ class DocumentService:
         return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """High-accuracy RAG pipeline with a two-stage retrieval (Vector Search + Re-ranker)."""
+        """High-accuracy RAG pipeline with a robust embedding model and re-ranking."""
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
 
         if not document.chunks:
-            return "Error: The document is empty or contains no readable text. Cannot process the query."
+            return "Error: The document is empty or contains no readable text."
 
-        # 1. Broad Vector Search
+        # 1. Vector Search
         pinecone_index = pinecone_client.get_index()
         query_embedding = self.embeddings_model.embed_query(question)
         query_response = pinecone_index.query(vector=query_embedding, top_k=20, include_metadata=True)
@@ -86,7 +94,7 @@ class DocumentService:
 
         initial_docs = [match['metadata']['text'] for match in query_response['matches']]
         
-        # 2. Precise Re-ranking
+        # 2. Re-rank the results
         reranked_results = self.cohere_client.rerank(
             query=question, documents=initial_docs, top_n=7, model="rerank-english-v3.0"
         )
@@ -98,10 +106,8 @@ class DocumentService:
         
         # 3. Generate Final Answer
         prompt = f"""
-        You are a meticulous assistant. Your task is to answer the user's question based *exclusively* on the provided context.
-        Analyze the context step-by-step to find the most relevant information.
-        If the answer is not present, you must state: "The information is not available in the provided document."
-        Provide a direct and concise final answer.
+        You are a meticulous assistant. Analyze the CONTEXT to answer the QUESTION.
+        If the answer is not present, state: "The information is not available in the provided document."
 
         CONTEXT:
         {context}

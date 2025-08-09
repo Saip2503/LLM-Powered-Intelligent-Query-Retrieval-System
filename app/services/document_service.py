@@ -8,7 +8,9 @@ from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """A simplified and robust RAG configuration."""
+        """
+        High-accuracy RAG configuration using Query Expansion (HyDE).
+        """
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -66,7 +68,7 @@ class DocumentService:
         return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """A simple and direct RAG pipeline."""
+        """RAG pipeline with Query Expansion (HyDE) for improved retrieval."""
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
@@ -74,10 +76,25 @@ class DocumentService:
         if not document.chunks:
             return "Error: The document is empty or contains no readable text."
 
-        # 1. Vector Search
+        # --- NEW: Query Expansion Step ---
+        # 1. Generate a hypothetical answer to create a better search query.
+        hyde_prompt = f"""
+        Please write a concise, hypothetical passage that would directly answer the following user question.
+        This passage will be used to search a knowledge base for the most relevant information.
+
+        USER QUESTION: {question}
+        """
+        hyde_response = await self.llm.ainvoke(hyde_prompt)
+        search_query = hyde_response.content
+        print(f"Generated HyDE Query: {search_query}")
+        # --- END OF NEW STEP ---
+
+        # 2. Embed the new, more detailed search query
+        query_embedding = self.embeddings_model.embed_query(search_query)
+
+        # 3. Retrieve relevant chunks from Pinecone
         pinecone_index = pinecone_client.get_index()
-        query_embedding = self.embeddings_model.embed_query(question)
-        query_response = pinecone_index.query(vector=query_embedding, top_k=10, include_metadata=True)
+        query_response = pinecone_index.query(vector=query_embedding, top_k=15, include_metadata=True)
         
         if not query_response or not query_response.matches:
             return "Could not find relevant information in the document."
@@ -85,12 +102,13 @@ class DocumentService:
         context_chunks = [match.metadata['text'] for match in query_response.matches if match.metadata and 'text' in match.metadata]
         context = "\n---\n".join(context_chunks)
         
-        # 2. Generate Final Answer
+        # 4. Generate the final answer
         prompt = f"""
         You are a meticulous assistant. Your task is to answer the user's question based *exclusively* on the provided context.
         Analyze the context step-by-step to find the most relevant information.
         If the answer is not present, you must state: "The information is not available in the provided document."
         Provide a direct and concise final answer.
+
         CONTEXT:
         {context}
 

@@ -11,16 +11,14 @@ from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """Final, high-accuracy RAG configuration with a specialized embedding model."""
+        """Final, robust RAG configuration with a specialized embedding model."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         
-        # --- NEW SPECIALIZED EMBEDDING MODEL ---
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.embeddings_model = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-mpnet-base-v2",
             model_kwargs={'device': device}
         )
-        # ------------------------------------
 
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
@@ -89,10 +87,18 @@ class DocumentService:
         query_embedding = self.embeddings_model.embed_query(question)
         query_response = pinecone_index.query(vector=query_embedding, top_k=20, include_metadata=True)
         
-        if not query_response or not query_response.get('matches'):
+        # --- THIS IS THE FIX ---
+        # Use attribute access (.matches) instead of dictionary access (['matches'])
+        if not query_response or not query_response.matches:
             return "Could not find relevant information in the document."
 
-        initial_docs = [match['metadata']['text'] for match in query_response['matches']]
+        # Use attribute access (.metadata) for each match
+        initial_docs = [
+            match.metadata['text'] 
+            for match in query_response.matches 
+            if match.metadata and 'text' in match.metadata
+        ]
+        # --- END OF FIX ---
         
         # 2. Re-rank the results
         reranked_results = self.cohere_client.rerank(

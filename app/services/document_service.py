@@ -9,7 +9,7 @@ from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """High-accuracy configuration using Parent Document chunking."""
+        """High-accuracy configuration using Parent Document chunking and Hybrid Search."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
@@ -68,7 +68,7 @@ class DocumentService:
             pinecone_vectors.append({
                 "id": child_chunk.chunk_id,
                 "values": child_embeddings[i],
-                "metadata": {} # No need to store text, it's in MongoDB
+                "metadata": {"text": child_chunk.text}
             })
 
         pinecone_index = pinecone_client.get_index()
@@ -82,7 +82,7 @@ class DocumentService:
         return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """High-accuracy RAG pipeline with Parent Document Retrieval and Re-ranking."""
+        """High-accuracy RAG pipeline with Parent Document Retrieval."""
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
@@ -90,29 +90,52 @@ class DocumentService:
         if not document.parent_chunks:
             return "Error: The document is empty or contains no readable text. Cannot process the query."
 
-        # 1. Vector Search on CHILD chunks
-        retrieved_child_ids = set()
-        pinecone_index = pinecone_client.get_index()
-        query_embedding = self.embeddings_model.embed_query(question)
-        query_response = pinecone_index.query(vector=query_embedding, top_k=20, include_metadata=False)
-        if query_response and query_response.get('matches'):
-            for match in query_response['matches']:
-                retrieved_child_ids.add(match['id'])
-                        
-        # 2. Retrieve corresponding PARENT Chunks
+        # 1. Multi-Query Generation
+        query_generation_prompt = f"Generate 3 alternative versions of this question for a document search: {question}"
+        query_generation_response = await self.llm.ainvoke(query_generation_prompt)
+        all_queries = [question] + [q.strip() for q in query_generation_response.content.strip().split('\n') if q.strip()]
+
+        # 2. Hybrid Search on CHILD chunks
+        all_child_chunks = [child for parent in document.parent_chunks for child in parent.children]
+        all_child_texts = [chunk.text for chunk in all_child_chunks]
+        
+        bm25_retriever = BM25Retriever.from_texts(all_child_texts, k=15)
+        
+        # --- OPTIMIZATION: Create efficient lookup maps ONCE before the loop ---
         child_to_parent_map = {
             child.chunk_id: parent.text 
             for parent in document.parent_chunks 
             for child in parent.children
         }
+        child_text_to_id_map = {child.text: child.chunk_id for child in all_child_chunks}
+        # --------------------------------------------------------------------
         
+        retrieved_child_ids = set()
+        pinecone_index = pinecone_client.get_index()
+
+        for query_text in all_queries:
+            # Vector search
+            query_embedding = self.embeddings_model.embed_query(query_text)
+            query_response = pinecone_index.query(vector=query_embedding, top_k=15, include_metadata=False)
+            if query_response and query_response.get('matches'):
+                for match in query_response['matches']:
+                    retrieved_child_ids.add(match['id'])
+            
+            # Keyword search with efficient mapping
+            bm25_results = bm25_retriever.invoke(query_text)
+            for doc in bm25_results:
+                child_id = child_text_to_id_map.get(doc.page_content)
+                if child_id:
+                    retrieved_child_ids.add(child_id)
+                        
+        # 3. Retrieve PARENT Chunks
         parent_texts_to_rerank = {child_to_parent_map.get(child_id) for child_id in retrieved_child_ids if child_to_parent_map.get(child_id)}
         initial_docs = list(parent_texts_to_rerank)
 
         if not initial_docs:
             return "Could not find relevant information in the document."
 
-        # 3. Re-rank the PARENT chunks for precision
+        # 4. Re-rank the PARENT chunks
         reranked_results = self.cohere_client.rerank(
             query=question, documents=initial_docs, top_n=5, model="rerank-english-v3.0"
         )
@@ -122,7 +145,7 @@ class DocumentService:
         ]
         context = "\n---\n".join(context_chunks)
         
-        # 4. Generate Final Answer with the best context
+        # 5. Generate Final Answer
         prompt = f"""
         You are a meticulous assistant. Analyze the CONTEXT to answer the QUESTION.
         If the answer is not present, state: "The information is not available in the provided document."

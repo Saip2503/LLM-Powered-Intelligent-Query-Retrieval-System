@@ -14,13 +14,11 @@ class DocumentService:
         """Final, robust RAG configuration with a new embedding model."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         
-        # --- NEW EMBEDDING MODEL ---
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.embeddings_model = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-mpnet-base-v2",
             model_kwargs={'device': device}
         )
-        # ---------------------------
 
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
@@ -28,7 +26,9 @@ class DocumentService:
     def _get_text_from_source(self, source: str) -> str:
         """Gets text content from a URL or local file, robust against errors."""
         try:
-            if source.startswith("http://") or source.startswith("https-://"):
+            # --- THIS IS THE FIX ---
+            if source.startswith("http://") or source.startswith("https://"):
+            # -----------------------
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
                 response = requests.get(source, headers=headers, timeout=45)
                 response.raise_for_status()

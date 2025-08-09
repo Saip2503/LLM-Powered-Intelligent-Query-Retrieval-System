@@ -12,6 +12,3 @@ langchain-google-genai
 cohere
 PyMuPDF
 langchain-community
-langchain-huggingface
-sentence-transformers
-torch

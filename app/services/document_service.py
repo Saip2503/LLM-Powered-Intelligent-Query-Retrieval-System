@@ -98,8 +98,10 @@ class DocumentService:
         
         # 3. Generate Final Answer
         prompt = f"""
-        You are a meticulous assistant. Analyze the CONTEXT to answer the QUESTION.
-        If the answer is not present, state: "The information is not available in the provided document."
+        You are a meticulous assistant. Your task is to answer the user's question based *exclusively* on the provided context.
+        Analyze the context step-by-step to find the most relevant information.
+        If the answer is not present, you must state: "The information is not available in the provided document."
+        Provide a direct and concise final answer.
 
         CONTEXT:
         {context}

@@ -1,24 +1,19 @@
 import fitz
 import requests
 import cohere
-import torch
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from app.db_mongo.models import Document, Chunk
 from app.vector_db.pinecone_client import pinecone_client
 from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """Final, robust RAG configuration with a new embedding model."""
+        """Final, robust RAG configuration using Google's powerful APIs."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.embeddings_model = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-mpnet-base-v2",
-            model_kwargs={'device': device}
-        )
+        # Reverted to Google's efficient and powerful embedding model
+        self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
@@ -26,9 +21,7 @@ class DocumentService:
     def _get_text_from_source(self, source: str) -> str:
         """Gets text content from a URL or local file, robust against errors."""
         try:
-            # --- THIS IS THE FIX ---
             if source.startswith("http://") or source.startswith("https://"):
-            # -----------------------
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
                 response = requests.get(source, headers=headers, timeout=45)
                 response.raise_for_status()

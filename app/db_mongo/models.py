@@ -4,22 +4,16 @@ from typing import List, Optional, Annotated
 from datetime import datetime
 import uuid
 
-class ChildChunk(BaseModel):
-    """Represents a small, precise chunk for vector search."""
+class Chunk(BaseModel):
+    """Represents a single, standard chunk of text."""
     chunk_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     text: str
-
-class ParentChunk(BaseModel):
-    """Represents a larger, context-rich chunk to be sent to the LLM."""
-    chunk_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    text: str
-    children: List[ChildChunk] = []
 
 class Document(BeanieDocument):
-    """Represents a processed document, now containing parent chunks."""
+    """Represents a processed document with a simple list of chunks."""
     source_url: Annotated[str, Indexed(unique=True)]
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    parent_chunks: List[ParentChunk] = []
+    chunks: List[Chunk] = []
 
     class Settings:
         name = "documents"

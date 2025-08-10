@@ -33,7 +33,6 @@ class DocumentService:
             # Use unstructured to partition the PDF, extracting text, tables, etc.
             elements = partition_pdf(
                 filename=filepath,
-                # Other options include "hi_res" for OCR, etc.
                 strategy="fast", 
                 infer_table_structure=True, # Crucial for table extraction
                 extract_images_in_pdf=False

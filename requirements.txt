@@ -12,3 +12,5 @@ langchain-google-genai
 cohere
 unstructured[pdf]
 langchain-community
+pdf2image
+pdfminer.six

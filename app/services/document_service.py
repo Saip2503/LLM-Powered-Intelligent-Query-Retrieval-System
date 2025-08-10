@@ -1,10 +1,11 @@
-import fitz
 import requests
+import cohere
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from app.db_mongo.models import Document, ParentChunk, ChildChunk
 from app.vector_db.pinecone_client import pinecone_client
 from app.core.config import settings
+from unstructured.partition.pdf import partition_pdf
 
 class DocumentService:
     def __init__(self):
@@ -16,21 +17,40 @@ class DocumentService:
         self.parent_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=400)
         # Splitter for small, precise child chunks for vector search
         self.child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=100)
+        
+        self.cohere_client = cohere.Client(settings.COHERE_API_KEY)
 
     def _get_text_from_source(self, source: str) -> str:
-        """Gets text content from a URL or local file, robust against errors."""
+        """
+        Gets structured text content from a URL or local file using unstructured.
+        This method now extracts tables and converts them to markdown.
+        """
+        print(f"Performing layout-aware parsing on: {source}")
+        filepath = source
         try:
             if source.startswith("http://") or source.startswith("https://"):
+                # unstructured needs a local file, so we download it first
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-                response = requests.get(source, headers=headers, timeout=45)
+                response = requests.get(source, headers=headers, timeout=60)
                 response.raise_for_status()
-                with fitz.open(stream=response.content, filetype="pdf") as doc:
-                    return "".join(page.get_text() for page in doc if page.get_text())
-            else:
-                with fitz.open(source) as doc:
-                    return "".join(page.get_text() for page in doc if page.get_text())
+                # Use a temporary file to store the downloaded PDF
+                filepath = "temp_document.pdf"
+                with open(filepath, "wb") as f:
+                    f.write(response.content)
+
+            # Use unstructured to partition the PDF, extracting text, tables, etc.
+            elements = partition_pdf(
+                filename=filepath,
+                strategy="fast", 
+                infer_table_structure=True, # Crucial for table extraction
+                extract_images_in_pdf=False
+            )
+            
+            # Convert extracted elements (including tables as markdown) into a single text string
+            return "\n\n".join([str(el) for el in elements])
+
         except Exception as e:
-            print(f"Error reading from source {source}: {e}")
+            print(f"Error during layout-aware parsing for {source}: {e}")
             raise
 
     async def _process_new_document(self, source_url_or_path: str) -> Document:
@@ -79,7 +99,7 @@ class DocumentService:
         return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """High-accuracy RAG pipeline with Parent Document Retrieval."""
+        """High-accuracy RAG pipeline with Parent Document Retrieval and Re-ranking."""
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)

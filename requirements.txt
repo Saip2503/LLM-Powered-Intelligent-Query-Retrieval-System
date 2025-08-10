@@ -10,5 +10,5 @@ rank_bm25
 langchain
 langchain-google-genai
 cohere
-PyMuPDF
+unstructured[pdf]
 langchain-community

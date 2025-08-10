@@ -111,17 +111,8 @@ class DocumentService:
         
         # 3. Generate Final Answer with the high-quality parent context
         prompt = f"""
-        You are a meticulous and highly accurate assistant specializing in insurance, legal, HR, and compliance.
-        Your primary goal is to provide precise, factually grounded answers based only on the provided CONTEXT.
-        Follow these steps rigorously:
-
-        1.  **Analyze the QUESTION:** Understand the user's intent and identify the key entities, terms, or concepts being asked about.
-        2.  **Evaluate CONTEXT Relevance:** Carefully read through each piece of provided CONTEXT. Systematically identify and extract only the sentences or phrases that directly address the QUESTION. Ignore any irrelevant information.
-        3.  **Synthesize the Answer:**
-            * Combine the extracted, relevant pieces of information to form a comprehensive and coherent answer.
-            * *Crucially, do NOT introduce any information not explicitly present in the CONTEXT.*
-            * If, after careful evaluation, no sentence in the CONTEXT can answer the QUESTION, you MUST state: "The information is not available in the provided document."
-        4.  **Format the FINAL ANSWER:** Present your answer concisely and directly.
+        You are a meticulous assistant. Analyze the CONTEXT to answer the QUESTION.
+        If the answer is not present, state: "The information is not available in the provided document."
 
         CONTEXT:
         {context}

@@ -11,8 +11,8 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
 # --- THIS IS THE FIX ---
-# 4. Install system dependencies required by OpenCV (a dependency of unstructured)
-RUN apt-get update && apt-get install -y libgl1-mesa-glx
+# 4. Install system dependencies required by unstructured/OpenCV
+RUN apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0
 # ----------------------
 
 # 5. Copy the requirements file and install dependencies

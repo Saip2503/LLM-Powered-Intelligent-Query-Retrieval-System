@@ -2,21 +2,23 @@ import fitz
 import requests
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from app.db_mongo.models import Document, Chunk
+from app.db_mongo.models import Document, ParentChunk, ChildChunk
 from app.vector_db.pinecone_client import pinecone_client
 from app.core.config import settings
 
 class DocumentService:
     def __init__(self):
-        """
-        High-accuracy RAG configuration using Query Expansion (HyDE).
-        """
+        """High-accuracy configuration using Parent Document chunking."""
         self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
         self.embeddings_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+
+        # Splitter for large, context-rich parent chunks
+        self.parent_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=400)
+        # Splitter for small, precise child chunks for vector search
+        self.child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=100)
 
     def _get_text_from_source(self, source: str) -> str:
-        """Gets text content from a URL or local file."""
+        """Gets text content from a URL or local file, robust against errors."""
         try:
             if source.startswith("http://") or source.startswith("https://"):
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -32,29 +34,38 @@ class DocumentService:
             raise
 
     async def _process_new_document(self, source_url_or_path: str) -> Document:
-        """Processes a new document with standard chunking."""
-        print(f"Processing new document from {source_url_or_path}...")
+        """Processes a new document using the Parent Document chunking strategy."""
+        print(f"Processing new document with Parent-Child strategy from {source_url_or_path}...")
         document_text = self._get_text_from_source(source_url_or_path)
         
         if not document_text:
              print(f"WARNING: No text could be extracted. Skipping.")
-             empty_doc = Document(source_url=source_url_or_path, chunks=[])
+             empty_doc = Document(source_url=source_url_or_path, parent_chunks=[])
              await empty_doc.insert()
              return empty_doc
 
-        text_chunks = self.text_splitter.split_text(document_text)
-        document_chunks = [Chunk(text=t) for t in text_chunks]
-        new_document = Document(source_url=source_url_or_path, chunks=document_chunks)
+        parent_texts = self.parent_splitter.split_text(document_text)
+        new_document = Document(source_url=source_url_or_path, parent_chunks=[])
         
-        chunk_texts_for_embedding = [chunk.text for chunk in document_chunks]
-        chunk_embeddings = self.embeddings_model.embed_documents(chunk_texts_for_embedding)
+        all_child_chunks = []
+        for parent_text in parent_texts:
+            parent_chunk = ParentChunk(text=parent_text, children=[])
+            child_texts = self.child_splitter.split_text(parent_text)
+            for child_text in child_texts:
+                child_chunk = ChildChunk(text=child_text)
+                parent_chunk.children.append(child_chunk)
+                all_child_chunks.append(child_chunk)
+            new_document.parent_chunks.append(parent_chunk)
+
+        child_texts_for_embedding = [chunk.text for chunk in all_child_chunks]
+        child_embeddings = self.embeddings_model.embed_documents(child_texts_for_embedding)
 
         pinecone_vectors = []
-        for i, chunk in enumerate(document_chunks):
+        for i, child_chunk in enumerate(all_child_chunks):
             pinecone_vectors.append({
-                "id": chunk.chunk_id,
-                "values": chunk_embeddings[i],
-                "metadata": {"text": chunk.text}
+                "id": child_chunk.chunk_id,
+                "values": child_embeddings[i],
+                "metadata": {} # No need to store text, it's in MongoDB
             })
 
         pinecone_index = pinecone_client.get_index()
@@ -64,50 +75,53 @@ class DocumentService:
                 pinecone_index.upsert(vectors=pinecone_vectors[i:i + batch_size])
         
         await new_document.insert()
-        print(f"Successfully processed document with {len(text_chunks)} chunks.")
+        print(f"Successfully processed document with {len(new_document.parent_chunks)} parent chunks and {len(all_child_chunks)} child chunks.")
         return new_document
 
     async def answer_question(self, document_source: str, question: str) -> str:
-        """RAG pipeline with Query Expansion (HyDE) for improved retrieval."""
+        """High-accuracy RAG pipeline with Parent Document Retrieval."""
         document = await Document.find_one(Document.source_url == document_source)
         if not document:
             document = await self._process_new_document(document_source)
 
-        if not document.chunks:
-            return "Error: The document is empty or contains no readable text."
+        if not document.parent_chunks:
+            return "Error: The document is empty or contains no readable text. Cannot process the query."
 
-        # --- NEW: Query Expansion Step ---
-        # 1. Generate a hypothetical answer to create a better search query.
-        hyde_prompt = f"""
-        Please write a concise, hypothetical passage that would directly answer the following user question.
-        This passage will be used to search a knowledge base for the most relevant information.
-
-        USER QUESTION: {question}
-        """
-        hyde_response = await self.llm.ainvoke(hyde_prompt)
-        search_query = hyde_response.content
-        print(f"Generated HyDE Query: {search_query}")
-        # --- END OF NEW STEP ---
-
-        # 2. Embed the new, more detailed search query
-        query_embedding = self.embeddings_model.embed_query(search_query)
-
-        # 3. Retrieve relevant chunks from Pinecone
+        # 1. Vector Search on CHILD chunks
+        retrieved_child_ids = set()
         pinecone_index = pinecone_client.get_index()
-        query_response = pinecone_index.query(vector=query_embedding, top_k=15, include_metadata=True)
+        query_embedding = self.embeddings_model.embed_query(question)
+        query_response = pinecone_index.query(vector=query_embedding, top_k=10, include_metadata=False)
+        if query_response and query_response.matches:
+            for match in query_response.matches:
+                retrieved_child_ids.add(match.id)
+                        
+        # 2. Retrieve corresponding PARENT Chunks
+        child_to_parent_map = {
+            child.chunk_id: parent.text 
+            for parent in document.parent_chunks 
+            for child in parent.children
+        }
         
-        if not query_response or not query_response.matches:
-            return "Could not find relevant information in the document."
+        context_chunks = {child_to_parent_map.get(child_id) for child_id in retrieved_child_ids if child_to_parent_map.get(child_id)}
+        context = "\n---\n".join(list(context_chunks))
 
-        context_chunks = [match.metadata['text'] for match in query_response.matches if match.metadata and 'text' in match.metadata]
-        context = "\n---\n".join(context_chunks)
+        if not context:
+            return "Could not find relevant information in the document."
         
-        # 4. Generate the final answer
+        # 3. Generate Final Answer with the high-quality parent context
         prompt = f"""
-        You are a meticulous assistant. Your task is to answer the user's question based *exclusively* on the provided context.
-        Analyze the context step-by-step to find the most relevant information.
-        If the answer is not present, you must state: "The information is not available in the provided document."
-        Provide a direct and concise final answer.
+        You are a meticulous and highly accurate assistant specializing in insurance, legal, HR, and compliance.
+        Your primary goal is to provide precise, factually grounded answers based only on the provided CONTEXT.
+        Follow these steps rigorously:
+
+        1.  **Analyze the QUESTION:** Understand the user's intent and identify the key entities, terms, or concepts being asked about.
+        2.  **Evaluate CONTEXT Relevance:** Carefully read through each piece of provided CONTEXT. Systematically identify and extract only the sentences or phrases that directly address the QUESTION. Ignore any irrelevant information.
+        3.  **Synthesize the Answer:**
+            * Combine the extracted, relevant pieces of information to form a comprehensive and coherent answer.
+            * *Crucially, do NOT introduce any information not explicitly present in the CONTEXT.*
+            * If, after careful evaluation, no sentence in the CONTEXT can answer the QUESTION, you MUST state: "The information is not available in the provided document."
+        4.  **Format the FINAL ANSWER:** Present your answer concisely and directly.
 
         CONTEXT:
         {context}
